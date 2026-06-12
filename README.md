@@ -85,8 +85,6 @@ cd LiveKit_Kokoro_TTS
 git clone https://github.com/remsky/Kokoro-FastAPI.git
 ```
 
-> Replace `<YOUR_ORG>` with your actual GitHub username or organization.
-
 ---
 
 #  4. Start Kokoro TTS Server
