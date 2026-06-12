@@ -82,7 +82,7 @@ cd LiveKit_Kokoro_TTS
 ## Clone Kokoro-FastAPI (TTS Server)
 
 ```bash
-git clone https://github.com/<YOUR_ORG>/Kokoro-FastAPI.git
+git clone https://github.com/remsky/Kokoro-FastAPI.git
 ```
 
 > Replace `<YOUR_ORG>` with your actual GitHub username or organization.
