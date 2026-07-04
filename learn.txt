@@ -1,0 +1,181 @@
+================================================================================
+           LOCAL VOICE AGENT SYSTEM (JOEY & KOKORO TTS) - LEARNING GUIDE
+================================================================================
+
+This document explains the architecture of the Voice Agent system (Joey), what
+each component does, the issues we resolved during setup, and how to run or
+integrate this with other projects.
+
+--------------------------------------------------------------------------------
+1. WHAT KOKORO-FASTAPI DOES
+--------------------------------------------------------------------------------
+Kokoro-FastAPI is a local, lightweight Python web server running FastAPI. Its 
+purpose is to serve the state-of-the-art "Kokoro" Text-to-Speech (TTS) model
+through an API that is fully compatible with OpenAI's speech API.
+
+Key Responsibilities:
+- Exposes standard OpenAI endpoints:
+  - POST `/v1/audio/speech`: Synthesizes input text to audio.
+  - GET `/v1/audio/voices`: Lists loaded voice packs (e.g., af_bella, af_heart).
+- Runs inference locally using PyTorch on local hardware (e.g., Apple Metal 
+  MPS, CUDA, or CPU) and streams raw audio bytes back to the client.
+
+--------------------------------------------------------------------------------
+2. WHAT KOKORO.PY DOES
+--------------------------------------------------------------------------------
+kokoro.py is a custom adapter class (`KokoroTTS`) written for the LiveKit 
+Agents framework. LiveKit agents need to turn text outputs from the LLM into 
+audio to stream to the WebRTC voice channel.
+
+Key Responsibilities:
+- Extends the core class `livekit.agents.tts.TTS`.
+- Handles communication with our local Kokoro-FastAPI server (localhost:8880/v1).
+- Provides a custom `ChunkedStream` subclass (`KokoroTTSStream`) that fetches 
+  chunks of audio over HTTP using an asynchronous HTTP/OpenAI client, and yields 
+  them back to LiveKit to play.
+
+--------------------------------------------------------------------------------
+3. PROBLEMS RESOLVED & TECHNICAL SOLUTIONS
+--------------------------------------------------------------------------------
+
+Issue A: The "No Audio Frames Pushed" error in openai.TTS (agent.py)
+- Problem:
+  - Originally, the code used LiveKit's standard `openai.TTS(model="kokoro", ...)`
+  - Under the hood, LiveKit's OpenAI plugin checks the model name. If the model 
+    is NOT in a specific hardcoded set (like `tts-1`), it assumes the server uses 
+    Server-Sent Events (SSE) stream format ("sse").
+  - However, our local Kokoro-FastAPI server serves raw audio streams ("audio"), 
+    not SSE data.
+  - Because LiveKit's SSE parser was waiting for lines starting with `data: ` 
+    and only got binary audio data, it ignored all data and threw an error.
+- Solution:
+  - We changed the model configuration in `agent.py` to `model="tts-1"`.
+  - This forced LiveKit's OpenAI plugin to use `AudioChunkedStream`, which parses 
+    raw audio streams (instead of SSE lines), enabling the local audio data to be 
+    parsed and spoken correctly.
+
+Issue B: The custom adapter TypeError in KokoroTTS (kokoro.py)
+- Problem:
+  - The custom `KokoroTTSStream._run` method had the signature `async def _run(self):`
+  - In newer versions of the `livekit-agents` library, the parent class 
+    defines `_run` as `async def _run(self, output_emitter: tts.AudioEmitter)`
+  - This mismatch caused a runtime `TypeError` when the engine ran.
+- Solution:
+  - We rewrote `KokoroTTSStream._run` to accept the `output_emitter` parameter
+    and push the bytes directly into it using `output_emitter.push(data)`.
+
+Issue C: Docker path vs. Local macOS path crash (config.py)
+- Problem:
+  - The default configuration of Kokoro-FastAPI used hardcoded absolute paths inside
+    Docker container containers (`/app/api/src/models`, `/app/api/src/voices/v1_0`).
+  - Locally on macOS, these paths did not exist and crashed the server startup.
+- Solution:
+  - We modified `Kokoro-FastAPI/api/src/core/config.py` to use relative paths 
+    `src/models` and `src/voices/v1_0` which resolve properly relative to the 
+    `api/` directory during startup.
+
+--------------------------------------------------------------------------------
+4. SYSTEM DESIGN (LIVEKIT CLOUD INFERENCE LLM/STT + LOCAL TTS)
+--------------------------------------------------------------------------------
+The system uses LiveKit's managed cloud infrastructure for intelligence, and 
+a local model for voice generation:
+1. **LLM**: Online model `openai/gpt-4.1-mini` via LiveKit Cloud Inference.
+2. **STT**: Online model `assemblyai/universal-streaming:en` via LiveKit Cloud Inference.
+3. **TTS**: Offline/local Kokoro model (`tts-1`) running locally on port `8880`.
+4. **Adaptive Interruption**: Handled automatically online by LiveKit Cloud.
+
+No local API keys are required for the LLM or STT, as LiveKit Cloud manages 
+these connections directly via your project's LiveKit token.
+
+--------------------------------------------------------------------------------
+5. HOW TO RUN THIS SYSTEM
+--------------------------------------------------------------------------------
+
+Prerequisites:
+- Ensure your `.env` file contains your active LiveKit Cloud project credentials:
+  ```
+  LIVEKIT_URL=wss://your-project.livekit.cloud
+  LIVEKIT_API_KEY=your_api_key
+  LIVEKIT_API_SECRET=your_api_secret
+  ```
+
+Method A: Run everything at once (Recommended)
+```bash
+# Set up execute permissions first
+chmod +x start.sh
+
+# Run in Console Mode (mic/speaker directly in your terminal)
+./start.sh
+
+# Run in Dev Server Mode (registers a WebRTC worker with your LiveKit server)
+./start.sh dev
+```
+
+Method B: Run manually in separate terminal tabs
+- **Step 2: Start the Kokoro-FastAPI server (TTS Engine)**
+  ```bash
+  cd Kokoro-FastAPI
+  uv run uvicorn api.src.main:app --port 8880
+  ```
+- **Step 2: Start your Agent Worker**
+  ```bash
+  # Run in dev mode (for WebRTC connection)
+  uv run python agent.py dev
+  
+  # Run in console mode
+  uv run python agent.py console
+  ```
+
+--------------------------------------------------------------------------------
+6. INTEGRATION WITH OTHER PROJECTS
+--------------------------------------------------------------------------------
+
+A. Integrating local TTS (Kokoro) with other Python/Node.js projects
+----------------------------------------------------------------------
+Because Kokoro-FastAPI implements OpenAI-compatible audio speech endpoints, 
+you can use any official OpenAI client library:
+
+```python
+# Python Example
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8880/v1", api_key="not-needed")
+response = client.audio.speech.create(
+    model="tts-1",
+    voice="af_bella",
+    input="Hello! This TTS engine runs fully locally on port 8880."
+)
+response.stream_to_file("speech.mp3")
+```
+
+```javascript
+// Node.js Example
+import OpenAI from "openai";
+import fs from "fs";
+
+const openai = new OpenAI({ baseURL: "http://localhost:8880/v1", apiKey: "not-needed" });
+const mp3 = await openai.audio.speech.create({
+  model: "tts-1",
+  voice: "af_bella",
+  input: "Hello from Node.js!",
+});
+const buffer = Buffer.from(await mp3.arrayBuffer());
+await fs.promises.writeFile("./speech.mp3", buffer);
+```
+
+B. Integrating Kokoro TTS into another LiveKit Agent project
+----------------------------------------------------------------------
+1. Copy [kokoro.py](file:///Users/monamukilss/Documents/Laptop/AI/tts_file/Livekit/kokoro.py) into your new project directory.
+2. Instantiate `KokoroTTS` inside your agent entrypoint:
+   ```python
+   from kokoro import KokoroTTS
+   
+   tts = KokoroTTS(
+       base_url="http://localhost:8880/v1",
+       api_key="not-needed",
+       model="kokoro",
+       voice="af_bella"
+   )
+   ```
+3. Pass `tts` to your `AgentSession` or `VoicePipelineAgent` definition.
+================================================================================
